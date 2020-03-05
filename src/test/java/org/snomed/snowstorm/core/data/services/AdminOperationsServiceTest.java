@@ -81,7 +81,7 @@ public class AdminOperationsServiceTest extends AbstractTest {
 		assertEquals(18, releasedTotal);
 
 		// Delay before new authoring cycle import
-		Thread.sleep(15_000L);
+		Thread.sleep(30_000L);
 
 		// import new authoring cycle to MAIN
 		File authoringDelta = ZipUtil.zipDirectoryRemovingCommentsAndBlankLines("src/test/resources/dummy-snomed-content/SnomedCT_MiniRF2_New_Authoring_cyle_delta");
