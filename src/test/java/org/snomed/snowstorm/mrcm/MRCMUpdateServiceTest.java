@@ -16,6 +16,7 @@ import org.snomed.snowstorm.core.data.services.ConceptService;
 import org.snomed.snowstorm.core.data.services.ReferenceSetMemberService;
 import org.snomed.snowstorm.core.data.services.ServiceTestUtil;
 import org.snomed.snowstorm.mrcm.model.*;
+import org.snomed.snowstorm.util.ExpressionsDiffUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
@@ -126,6 +127,9 @@ public class MRCMUpdateServiceTest extends AbstractTest {
 				" OR (<< 404684003 |Clinical finding (finding)|: [0..*] { [0..1] 255234002 |After| = (<< 272379006 |Event (event)| OR << 404684003 |Clinical finding (finding)| OR << 71388002 |Procedure (procedure)|) })";
 
 		assertEquals(expected, range.getAdditionalField("attributeRule"));
+
+		String published = "";
+		assertFalse(ExpressionsDiffUtil.diffExpressions(published, expected, true, true));
 
 		// verify domain templates
 		eventDomain = memberService.findMember(branch.getPath(), eventDomain.getMemberId());
@@ -360,8 +364,18 @@ public class MRCMUpdateServiceTest extends AbstractTest {
 				" [[0..*]] 733933004 |Lateral half of| = [[+id(<< 123037004|Body structure (body structure)|)]]," +
 				" [[0..*]] 774081006 |Proper part of| = [[+id(<< 123037004|Body structure (body structure)|)]]";
 
-		diff(expected, actual);
+		String published = "[[+id(^ 723264001 |Lateralizable body structure reference set (foundation metadata concept)|)]]:" +
+				" [[0..1]] 272741003 |Laterality| = [[+id(<< 182353008 |Side (qualifier value)|)]]," +
+				" [[0..*]] 733928003 |All or part of| = [[+id(<< 123037004|Body structure (body structure)|)]]," +
+				" [[0..*]] 733931002 |Constitutional part of| = [[+id(<< 123037004|Body structure (body structure)|)]]," +
+				" [[0..*]] 733930001 |Regional part of| = [[+id(<< 123037004|Body structure (body structure)|)]]," +
+				" [[0..*]] 733933004 |Lateral half of| = [[+id(<< 123037004|Body structure (body structure)|)]]," +
+				" [[0..*]] 733932009 |Systemic part of| = [[+id(<< 123037004|Body structure (body structure)|)]]," +
+				" [[0..*]] 774081006 |Proper part of| = [[+id(<< 123037004 |Body structure (body structure)|)]]";
+
 		assertEquals(expected, actual);
+
+		assertFalse(ExpressionsDiffUtil.diffTemplates(published, actual, true, true));
 
 	}
 
@@ -377,29 +391,4 @@ public class MRCMUpdateServiceTest extends AbstractTest {
 		assertEquals(expected,
 				mrcmUpdateService.sortExpressionConstraintByConceptId(rangeConstraint, "1a9b01ce-6385-11ea-9b6e-3c15c2c6e32e"));
 	}
-
-	private void diff(String published, String actual) {
-		List<String> publishedSorted = split(published);
-		List<String> actualSorted = split(actual);
-		assertEquals(publishedSorted.size(), actualSorted.size());
-		for (String token : publishedSorted) {
-			if (!actualSorted.contains(token)) {
-				System.out.println("expected token " + token + " but not found");
-			}
-		}
-	}
-
-	private List<String> split(String expression) {
-		List<String> result = new ArrayList<>();
-		for (String part : expression.split(",", -1)) {
-			if (part.contains(":")) {
-				result.addAll(Arrays.asList(part.split(":", -1)));
-			} else {
-				result.add(part);
-			}
-		}
-		Collections.sort(result);
-		return result;
-	}
-
 }
