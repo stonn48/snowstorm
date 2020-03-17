@@ -157,9 +157,9 @@ public class AdminController {
 		adminOperationsService.cloneChildBranch(BranchPathUriUtil.decodePath(branch), newBranch);
 	}
 
-	@RequestMapping(value = "/{branch}/actions/apply-relationship-release-information", method = RequestMethod.POST)
+	@RequestMapping(value = "/{branch}/actions/restore-relationship-release-information", method = RequestMethod.POST)
 	@ResponseBody
-	public void applyRelationshipReleaseInformation(@PathVariable String branch) {
-		adminOperationsService.applyRelationshipReleaseInformation(BranchPathUriUtil.decodePath(branch));
+	public void restoreRelationshipReleaseInformation(@PathVariable String branch) {
+		adminOperationsService.restoreRelationshipReleaseInformation(BranchPathUriUtil.decodePath(branch));
 	}
 }

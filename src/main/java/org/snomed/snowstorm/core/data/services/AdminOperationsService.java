@@ -606,7 +606,7 @@ public class AdminOperationsService {
 		}
 	}
 
-	public void applyRelationshipReleaseInformation(String branch) {
+	public void restoreRelationshipReleaseInformation(String branch) {
 		CodeSystem codeSystem;
 		String codeSystemSearchBranch = branch;
 		do {
@@ -630,6 +630,7 @@ public class AdminOperationsService {
 								.must(termQuery(Relationship.Fields.CHARACTERISTIC_TYPE_ID, Relationship.CharacteristicType.inferred.getConceptId()))
 								.must(termQuery(Relationship.Fields.ACTIVE, true))
 						)
+						.withFields(Relationship.Fields.RELATIONSHIP_ID)
 						.withPageable(PageRequest.of(0, 10_000)).build(), Relationship.class)) {
 			stream.forEachRemaining(relationship -> {
 				releasedRelationships.add(parseLong(relationship.getRelationshipId()));
@@ -648,23 +649,28 @@ public class AdminOperationsService {
 		logger.info("{} released relationships found.", releasedRelationships.size());
 
 		// Find relationships which have lost their released details
-		Set<Long> lostInfoRelationships = new LongOpenHashSet();
+		Set<Long> releasedFoundOnBranch = new LongOpenHashSet();
 		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
-		// TODO: this won't find relationships which have been deleted
 		for (List<Long> releasedRelationshipBatch : partition(releasedRelationships, 10_000)) {
 			try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
 					new NativeSearchQueryBuilder()
 							.withQuery(boolQuery()
 									.must(branchCriteria.getEntityBranchCriteria(Relationship.class))
-									.must(termQuery(Relationship.Fields.RELEASED, false))
+									.must(termQuery(Relationship.Fields.CHARACTERISTIC_TYPE_ID, Relationship.CharacteristicType.inferred.getConceptId()))
+									.must(termQuery(Relationship.Fields.RELEASED, true))
 							)
 							.withFilter(termsQuery(Relationship.Fields.RELATIONSHIP_ID, releasedRelationshipBatch))
+							.withFields(Relationship.Fields.RELATIONSHIP_ID, Relationship.Fields.RELEASED)
 							.withPageable(LARGE_PAGE).build(), Relationship.class)) {
-				stream.forEachRemaining(relationship -> lostInfoRelationships.add(parseLong(relationship.getRelationshipId())));
+				stream.forEachRemaining(relationship -> {
+					releasedFoundOnBranch.add(new Long(relationship.getRelationshipId()));
+				});
 			}
 		}
-		logger.info("{} relationships found on branch {} with missing release information, restoring...", lostInfoRelationships.size(), branch);
 
+		Set<Long> lostInfoRelationships = new LongOpenHashSet(releasedRelationships);
+		lostInfoRelationships.removeAll(releasedFoundOnBranch);
+		logger.info("{} relationships found on branch {} with missing release information, restoring...", lostInfoRelationships.size(), branch);
 		RelationshipRepository relationshipRepository = (RelationshipRepository) domainEntityConfiguration.getComponentTypeRepositoryMap().get(Relationship.class);
 		for (List<Long> batch : partition(lostInfoRelationships, 1_000)) {
 			Map<String, Relationship> releasedRelationshipMap = new HashMap<>();
@@ -693,10 +699,14 @@ public class AdminOperationsService {
 					fixedRelationships.put(relationshipToFix.getRelationshipId(), relationshipToFix);
 				});
 			}
+			logger.info("{} relationships found on branch {} are restored with release information...", fixedRelationships.keySet(), branch);
+
 			if (fixedRelationships.size() < releasedRelationshipMap.size()) {
+				Set<String> deleted = new HashSet<>();
 				// Some relationships deleted - probably made inactive by classifier before release flag set
 				for (String relationshipsId : releasedRelationshipMap.keySet()) {
 					if (!fixedRelationships.containsKey(relationshipsId)) {
+						deleted.add(relationshipsId);
 						Relationship relationship = releasedRelationshipMap.get(relationshipsId);
 						// Copy document to fix branch but make inactive
 						relationship.clearInternalId();// Creates copy on save
@@ -704,6 +714,9 @@ public class AdminOperationsService {
 						relationship.setActive(false);
 						fixedRelationships.put(relationshipsId, relationship);
 					}
+				}
+				if (deleted.size() > 1) {
+					logger.info("{} relationships were deleted on branch {} and are restored as published but inactive ...", deleted, branch);
 				}
 			}
 			// Update existing relationship documents within the existing commit
