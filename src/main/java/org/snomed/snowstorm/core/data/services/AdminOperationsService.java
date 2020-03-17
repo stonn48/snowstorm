@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.snomed.snowstorm.config.SearchLanguagesConfiguration;
 import org.snomed.snowstorm.core.data.domain.*;
+import org.snomed.snowstorm.core.data.repositories.RelationshipRepository;
 import org.snomed.snowstorm.core.rf2.RF2Constants;
 import org.snomed.snowstorm.core.util.DescriptionHelper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -603,5 +604,112 @@ public class AdminOperationsService {
 				} while (!page.isLast());
 			}
 		}
+	}
+
+	public void applyRelationshipReleaseInformation(String branch) {
+		CodeSystem codeSystem;
+		String codeSystemSearchBranch = branch;
+		do {
+			codeSystem = codeSystemService.findByBranchPath(codeSystemSearchBranch).orElse(null);
+			codeSystemSearchBranch = PathUtil.getParentPath(codeSystemSearchBranch);
+		} while (codeSystem == null && codeSystemSearchBranch != null);
+		if (codeSystem == null) {
+			throw new IllegalStateException("No code system found on this or ancestor branches.");
+		}
+
+		CodeSystemVersion latestRelease = codeSystemService.findLatestImportedVersion(codeSystem.getShortName());
+		String latestReleaseBranchPath = latestRelease.getBranchPath();
+
+		// Create list of all released relationship ids
+		Set<Long> releasedRelationships = new LongOpenHashSet();
+		BranchCriteria releasedBranchCriteria = versionControlHelper.getBranchCriteria(latestReleaseBranchPath);
+		try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
+				new NativeSearchQueryBuilder()
+						.withQuery(boolQuery()
+								.must(releasedBranchCriteria.getEntityBranchCriteria(Relationship.class))
+								.must(termQuery(Relationship.Fields.CHARACTERISTIC_TYPE_ID, Relationship.CharacteristicType.inferred.getConceptId()))
+								.must(termQuery(Relationship.Fields.ACTIVE, true))
+						)
+						.withPageable(PageRequest.of(0, 10_000)).build(), Relationship.class)) {
+			stream.forEachRemaining(relationship -> {
+				releasedRelationships.add(parseLong(relationship.getRelationshipId()));
+				if (releasedRelationships.size() % 1_000 == 0) {
+					System.out.print(".");
+				}
+				if (releasedRelationships.size() % 100_000 == 0) {
+					System.out.println("+");
+				}
+			});
+		}
+		if (releasedRelationships.isEmpty()) {
+			logger.warn("No released relationships found.");
+			return;
+		}
+		logger.info("{} released relationships found.", releasedRelationships.size());
+
+		// Find relationships which have lost their released details
+		Set<Long> lostInfoRelationships = new LongOpenHashSet();
+		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
+		// TODO: this won't find relationships which have been deleted
+		for (List<Long> releasedRelationshipBatch : partition(releasedRelationships, 10_000)) {
+			try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
+					new NativeSearchQueryBuilder()
+							.withQuery(boolQuery()
+									.must(branchCriteria.getEntityBranchCriteria(Relationship.class))
+									.must(termQuery(Relationship.Fields.RELEASED, false))
+							)
+							.withFilter(termsQuery(Relationship.Fields.RELATIONSHIP_ID, releasedRelationshipBatch))
+							.withPageable(LARGE_PAGE).build(), Relationship.class)) {
+				stream.forEachRemaining(relationship -> lostInfoRelationships.add(parseLong(relationship.getRelationshipId())));
+			}
+		}
+		logger.info("{} relationships found on branch {} with missing release information, restoring...", lostInfoRelationships.size(), branch);
+
+		RelationshipRepository relationshipRepository = (RelationshipRepository) domainEntityConfiguration.getComponentTypeRepositoryMap().get(Relationship.class);
+		for (List<Long> batch : partition(lostInfoRelationships, 1_000)) {
+			Map<String, Relationship> releasedRelationshipMap = new HashMap<>();
+			try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
+					new NativeSearchQueryBuilder()
+							.withQuery(boolQuery()
+									.must(releasedBranchCriteria.getEntityBranchCriteria(Relationship.class))
+									.must(termsQuery(Relationship.Fields.RELATIONSHIP_ID, batch))
+							)
+							.withPageable(LARGE_PAGE).build(), Relationship.class)) {
+				stream.forEachRemaining(relationship -> releasedRelationshipMap.put(relationship.getRelationshipId(), relationship));
+			}
+			Map<String, Relationship> fixedRelationships = new HashMap<>();
+			try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
+					new NativeSearchQueryBuilder()
+							.withQuery(boolQuery()
+									.must(branchCriteria.getEntityBranchCriteria(Relationship.class))
+									.must(termsQuery(Relationship.Fields.RELATIONSHIP_ID, releasedRelationshipMap.keySet()))
+							)
+							.withPageable(LARGE_PAGE).build(), Relationship.class)) {
+				stream.forEachRemaining(relationshipToFix -> {
+					Relationship releasedRelationship = releasedRelationshipMap.get(relationshipToFix.getRelationshipId());
+					relationshipToFix.setReleased(releasedRelationship.isReleased());
+					relationshipToFix.setReleasedEffectiveTime(releasedRelationship.getReleasedEffectiveTime());
+					relationshipToFix.setReleaseHash(releasedRelationship.getReleaseHash());
+					fixedRelationships.put(relationshipToFix.getRelationshipId(), relationshipToFix);
+				});
+			}
+			if (fixedRelationships.size() < releasedRelationshipMap.size()) {
+				// Some relationships deleted - probably made inactive by classifier before release flag set
+				for (String relationshipsId : releasedRelationshipMap.keySet()) {
+					if (!fixedRelationships.containsKey(relationshipsId)) {
+						Relationship relationship = releasedRelationshipMap.get(relationshipsId);
+						// Copy document to fix branch but make inactive
+						relationship.clearInternalId();// Creates copy on save
+						relationship.setPath(branch);
+						relationship.setActive(false);
+						fixedRelationships.put(relationshipsId, relationship);
+					}
+				}
+			}
+			// Update existing relationship documents within the existing commit
+			logger.info("Saving {} relationships with fixes release information on branch {}.", fixedRelationships.size(), branch);
+//			relationshipRepository.saveAll(fixedRelationships);
+		}
+
 	}
 }
