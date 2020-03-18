@@ -129,7 +129,7 @@ public class MRCMUpdateServiceTest extends AbstractTest {
 		assertEquals(expected, range.getAdditionalField("attributeRule"));
 
 		String published = "";
-		assertFalse(ExpressionsDiffUtil.diffExpressions(published, expected, true, true));
+		assertFalse(ExpressionsDiffUtil.diffExpressions("", published, expected, true));
 
 		// verify domain templates
 		eventDomain = memberService.findMember(branch.getPath(), eventDomain.getMemberId());
@@ -375,7 +375,7 @@ public class MRCMUpdateServiceTest extends AbstractTest {
 
 		assertEquals(expected, actual);
 
-		assertFalse(ExpressionsDiffUtil.diffTemplates(published, actual, true, true));
+		assertFalse(ExpressionsDiffUtil.diffTemplates(published, actual, true));
 
 	}
 
