@@ -159,7 +159,14 @@ public class AdminController {
 
 	@RequestMapping(value = "/{branch}/actions/restore-relationship-release-information", method = RequestMethod.POST)
 	@ResponseBody
-	public void restoreRelationshipReleaseInformation(@PathVariable String branch) {
-		adminOperationsService.restoreRelationshipReleaseInformation(BranchPathUriUtil.decodePath(branch));
+	public void restoreRelationshipReleaseInformation(@PathVariable String branch, @RequestParam MultipartFile relationshipSnapshotFile) throws IOException {
+		adminOperationsService.restoreRelationshipReleaseInformation(BranchPathUriUtil.decodePath(branch), relationshipSnapshotFile.getInputStream(), false);
+	}
+
+
+	@RequestMapping(value = "/{branch}/actions/clear-versions-replaced-information", method = RequestMethod.POST)
+	@ResponseBody
+	public void clearVersionsReplacedInformationOnBranch(@PathVariable String branch) {
+		adminOperationsService.clearVersionsReplacedInformation(BranchPathUriUtil.decodePath(branch));
 	}
 }

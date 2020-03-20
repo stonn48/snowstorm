@@ -76,7 +76,7 @@ public class AdminOperationsService {
 	private BranchRepository branchRepository;
 
 	private Logger logger = LoggerFactory.getLogger(getClass());
-	public static final int ONE_SECOND_IN_MILLIS = 1000;
+	public static final int QUARTER_OF_SECOND_IN_MILLIS = 250;
 
 	public void reindexDescriptionsForLanguage(String languageCode) throws IOException {
 		Map<String, Set<Character>> charactersNotFoldedSets = searchLanguagesConfiguration.getCharactersNotFoldedSets();
@@ -399,10 +399,10 @@ public class AdminOperationsService {
 
 		// Promotion commit will be one second after original version commit.
 		logger.info("Code system version commit head " + codeSystemVersionCommit.getHead().getTime());
-		Date promotionCommitTime = new Date(codeSystemVersionCommit.getHeadTimestamp() + (ONE_SECOND_IN_MILLIS));
+		Date promotionCommitTime = new Date(codeSystemVersionCommit.getHeadTimestamp() + (QUARTER_OF_SECOND_IN_MILLIS));
 
 		// Revert commit will be one second after promotion commit.
-		Date revertCommitTime = new Date(promotionCommitTime.getTime() + ONE_SECOND_IN_MILLIS);
+		Date revertCommitTime = new Date(promotionCommitTime.getTime() + QUARTER_OF_SECOND_IN_MILLIS);
 
 		// Check there are no commits on the timeline where we are trying to write
 		Branch existingBranchAtRevertCommit = branchService.findAtTimepointOrThrow(codeSystemPath, revertCommitTime);
@@ -606,7 +606,14 @@ public class AdminOperationsService {
 		}
 	}
 
-	public void restoreRelationshipReleaseInformation(String branch) {
+	public void restoreRelationshipReleaseInformation(String branch, InputStream relationshipSnapshotFileStream, boolean checkReleaseBranch) throws IOException {
+		boolean isActiveOnly = true;
+		Set<Long> relationshipIdsFromSnapshot = getRelationshipIds(relationshipSnapshotFileStream, isActiveOnly);
+		if (isActiveOnly) {
+			logger.info("{} active relationships found from file", relationshipIdsFromSnapshot.size());
+		} else {
+			logger.info("{} relationships found from file for both active and inactive", relationshipIdsFromSnapshot.size());
+		}
 		CodeSystem codeSystem;
 		String codeSystemSearchBranch = branch;
 		do {
@@ -619,39 +626,50 @@ public class AdminOperationsService {
 
 		CodeSystemVersion latestRelease = codeSystemService.findLatestImportedVersion(codeSystem.getShortName());
 		String latestReleaseBranchPath = latestRelease.getBranchPath();
-
-		// Create list of all released relationship ids
-		Set<Long> releasedRelationships = new LongOpenHashSet();
 		BranchCriteria releasedBranchCriteria = versionControlHelper.getBranchCriteria(latestReleaseBranchPath);
-		try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
-				new NativeSearchQueryBuilder()
-						.withQuery(boolQuery()
-								.must(releasedBranchCriteria.getEntityBranchCriteria(Relationship.class))
-								.must(termQuery(Relationship.Fields.CHARACTERISTIC_TYPE_ID, Relationship.CharacteristicType.inferred.getConceptId()))
-								.must(termQuery(Relationship.Fields.ACTIVE, true))
-						)
-						.withFields(Relationship.Fields.RELATIONSHIP_ID)
-						.withPageable(PageRequest.of(0, 10_000)).build(), Relationship.class)) {
-			stream.forEachRemaining(relationship -> {
-				releasedRelationships.add(parseLong(relationship.getRelationshipId()));
-				if (releasedRelationships.size() % 1_000 == 0) {
-					System.out.print(".");
+		if (checkReleaseBranch) {
+			// Create list of all released relationship ids
+			Set<Long> releasedRelationships = new LongOpenHashSet();
+			for (List<Long> batch : partition(relationshipIdsFromSnapshot, 10_000)) {
+				try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
+						new NativeSearchQueryBuilder()
+								.withQuery(boolQuery()
+										.must(releasedBranchCriteria.getEntityBranchCriteria(Relationship.class))
+										.must(termQuery(Relationship.Fields.CHARACTERISTIC_TYPE_ID, Relationship.CharacteristicType.inferred.getConceptId()))
+										.must(termQuery(Relationship.Fields.ACTIVE, true))
+								)
+								.withFilter(boolQuery().must(termsQuery(Relationship.Fields.RELATIONSHIP_ID, batch)))
+								.withFields(Relationship.Fields.RELATIONSHIP_ID)
+								.withPageable(PageRequest.of(0, 10_000)).build(), Relationship.class)) {
+					stream.forEachRemaining(relationship -> {
+						releasedRelationships.add(parseLong(relationship.getRelationshipId()));
+						if (releasedRelationships.size() % 1_000 == 0) {
+							System.out.print(".");
+						}
+						if (releasedRelationships.size() % 100_000 == 0) {
+							System.out.println("+");
+						}
+					});
 				}
-				if (releasedRelationships.size() % 100_000 == 0) {
-					System.out.println("+");
-				}
-			});
+			}
+			if (releasedRelationships.isEmpty()) {
+				logger.warn("No released relationships found.");
+				return;
+			}
+			logger.info("{} released relationships found on the release branch", releasedRelationships.size());
+			if (relationshipIdsFromSnapshot.size() != releasedRelationships.size()) {
+				Set<Long> missing = new LongOpenHashSet(relationshipIdsFromSnapshot);
+				missing.removeAll(releasedRelationships);
+				logger.info("{} released relationships from file but not found on the release branch", missing.size());
+				logger.info("e.g" + missing);
+			}
 		}
-		if (releasedRelationships.isEmpty()) {
-			logger.warn("No released relationships found.");
-			return;
-		}
-		logger.info("{} released relationships found.", releasedRelationships.size());
 
 		// Find relationships which have lost their released details
+		logger.info("Searching on branch {} for released relationships...", branch);
 		Set<Long> releasedFoundOnBranch = new LongOpenHashSet();
 		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
-		for (List<Long> releasedRelationshipBatch : partition(releasedRelationships, 10_000)) {
+		for (List<Long> releasedRelationshipBatch : partition(relationshipIdsFromSnapshot, 10_000)) {
 			try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
 					new NativeSearchQueryBuilder()
 							.withQuery(boolQuery()
@@ -660,7 +678,7 @@ public class AdminOperationsService {
 									.must(termQuery(Relationship.Fields.RELEASED, true))
 							)
 							.withFilter(termsQuery(Relationship.Fields.RELATIONSHIP_ID, releasedRelationshipBatch))
-							.withFields(Relationship.Fields.RELATIONSHIP_ID, Relationship.Fields.RELEASED)
+							.withFields(Relationship.Fields.RELATIONSHIP_ID)
 							.withPageable(LARGE_PAGE).build(), Relationship.class)) {
 				stream.forEachRemaining(relationship -> {
 					releasedFoundOnBranch.add(new Long(relationship.getRelationshipId()));
@@ -668,10 +686,11 @@ public class AdminOperationsService {
 			}
 		}
 
-		Set<Long> lostInfoRelationships = new LongOpenHashSet(releasedRelationships);
+		logger.info("{} relationships found on branch {} marked as released.", releasedFoundOnBranch.size(), branch);
+
+		Set<Long> lostInfoRelationships = new LongOpenHashSet(relationshipIdsFromSnapshot);
 		lostInfoRelationships.removeAll(releasedFoundOnBranch);
 		logger.info("{} relationships found on branch {} with missing release information, restoring...", lostInfoRelationships.size(), branch);
-		RelationshipRepository relationshipRepository = (RelationshipRepository) domainEntityConfiguration.getComponentTypeRepositoryMap().get(Relationship.class);
 		for (List<Long> batch : partition(lostInfoRelationships, 1_000)) {
 			Map<String, Relationship> releasedRelationshipMap = new HashMap<>();
 			try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
@@ -683,6 +702,7 @@ public class AdminOperationsService {
 							.withPageable(LARGE_PAGE).build(), Relationship.class)) {
 				stream.forEachRemaining(relationship -> releasedRelationshipMap.put(relationship.getRelationshipId(), relationship));
 			}
+
 			Map<String, Relationship> fixedRelationships = new HashMap<>();
 			try (CloseableIterator<Relationship> stream = elasticsearchTemplate.stream(
 					new NativeSearchQueryBuilder()
@@ -699,30 +719,65 @@ public class AdminOperationsService {
 					fixedRelationships.put(relationshipToFix.getRelationshipId(), relationshipToFix);
 				});
 			}
-			logger.info("{} relationships found on branch {} are restored with release information...", fixedRelationships.keySet(), branch);
+			logger.info("{} relationships are restored with release information on branch {}", fixedRelationships.size(), branch);
+			logger.info("Examples:" + fixedRelationships.keySet().iterator().next());
 
-			if (fixedRelationships.size() < releasedRelationshipMap.size()) {
+			if (fixedRelationships.keySet().size() < releasedRelationshipMap.keySet().size()) {
 				Set<String> deleted = new HashSet<>();
-				// Some relationships deleted - probably made inactive by classifier before release flag set
+				// Some relationships deleted - probably made inactive by classifier when release flag was set to false due to data issue
 				for (String relationshipsId : releasedRelationshipMap.keySet()) {
 					if (!fixedRelationships.containsKey(relationshipsId)) {
 						deleted.add(relationshipsId);
-						Relationship relationship = releasedRelationshipMap.get(relationshipsId);
-						// Copy document to fix branch but make inactive
-						relationship.clearInternalId();// Creates copy on save
-						relationship.setPath(branch);
-						relationship.setActive(false);
-						fixedRelationships.put(relationshipsId, relationship);
 					}
 				}
-				if (deleted.size() > 1) {
-					logger.info("{} relationships were deleted on branch {} and are restored as published but inactive ...", deleted, branch);
+				if (deleted.size() > 0) {
+					logger.info("{} relationships were deleted on branch or hidden by versions replaced {}  ", deleted.size(), branch);
+					logger.info("Examples:" + deleted.iterator().next());
+					logger.info("Clear version replaced or rebasing branch " + branch);
 				}
 			}
 			// Update existing relationship documents within the existing commit
 			logger.info("Saving {} relationships with fixes release information on branch {}.", fixedRelationships.size(), branch);
-//			relationshipRepository.saveAll(fixedRelationships);
+			RelationshipRepository relationshipRepository = (RelationshipRepository) domainEntityConfiguration.getComponentTypeRepositoryMap().get(Relationship.class);
+//			relationshipRepository.saveAll(fixedRelationships.values());
 		}
 
+	}
+
+	private Set<Long> getRelationshipIds(InputStream snapshotFileStream, boolean activeOnly) throws IOException {
+		Set<Long> activeRelationshipIds = new LongOpenHashSet();
+		try (BufferedReader reader = new BufferedReader(new InputStreamReader(snapshotFileStream))) {
+			String line;
+			String header = reader.readLine();
+			if (header == null || !header.equals(RF2Constants.RELATIONSHIP_HEADER)) {
+				throw new IllegalArgumentException("First line of file does not match the RF2 relationship header.");
+			}
+			long lineNumber = 0;
+			while ((line = reader.readLine()) != null && !line.isEmpty()) {
+				lineNumber++;
+				String[] rows = line.split("\t");
+				if (rows.length != 10) {
+					throw new IllegalArgumentException(String.format("Line %s does not have the expected 10 columns.", lineNumber));
+				}
+				if (activeOnly){
+					if (rows[2].equals("1")) {
+						activeRelationshipIds.add(Long.parseLong(rows[0]));
+					}
+				} else {
+					activeRelationshipIds.add(Long.parseLong(rows[0]));
+				}
+			}
+		}
+		return activeRelationshipIds;
+	}
+
+	public void clearVersionsReplacedInformation(String branchPath) {
+		if ("MAIN".equals(branchPath)) {
+			throw new IllegalArgumentException("Not allowed to clear version replaced on MAIN");
+		}
+		Branch branch = branchService.findBranchOrThrow(branchPath);
+		branch.setVersionsReplaced(Collections.EMPTY_MAP);
+		branchRepository.save(branch);
+		logger.info("Versions replaced information is cleared on branch " + branchPath);
 	}
 }
