@@ -720,7 +720,9 @@ public class AdminOperationsService {
 				});
 			}
 			logger.info("{} relationships are restored with release information on branch {}", fixedRelationships.size(), branch);
-			logger.info("Examples:" + fixedRelationships.keySet().iterator().next());
+			if (fixedRelationships.size() > 0) {
+				logger.info("Examples:" + fixedRelationships.keySet().iterator().next());
+			}
 
 			if (fixedRelationships.keySet().size() < releasedRelationshipMap.keySet().size()) {
 				Set<String> deleted = new HashSet<>();
@@ -737,9 +739,9 @@ public class AdminOperationsService {
 				}
 			}
 			// Update existing relationship documents within the existing commit
-			logger.info("Saving {} relationships with fixes release information on branch {}.", fixedRelationships.size(), branch);
 			RelationshipRepository relationshipRepository = (RelationshipRepository) domainEntityConfiguration.getComponentTypeRepositoryMap().get(Relationship.class);
-//			relationshipRepository.saveAll(fixedRelationships.values());
+			relationshipRepository.saveAll(fixedRelationships.values());
+			logger.info("{} relationships with fixes release information saved on branch {}.", fixedRelationships.size(), branch);
 		}
 
 	}
@@ -771,13 +773,18 @@ public class AdminOperationsService {
 		return activeRelationshipIds;
 	}
 
-	public void clearVersionsReplacedInformation(String branchPath) {
+	public void clearVersionsReplacedInformation(String branchPath, String type) {
 		if ("MAIN".equals(branchPath)) {
 			throw new IllegalArgumentException("Not allowed to clear version replaced on MAIN");
 		}
 		Branch branch = branchService.findBranchOrThrow(branchPath);
-		branch.setVersionsReplaced(Collections.EMPTY_MAP);
-		branchRepository.save(branch);
-		logger.info("Versions replaced information is cleared on branch " + branchPath);
+		if (branch.getVersionsReplaced() != null && branch.getVersionsReplaced().containsKey(type)) {
+			logger.info("Clearing versions replaced for type " + type);
+			branch.getVersionsReplaced().get(type).clear();
+			branchRepository.save(branch);
+			logger.info("Versions replaced information is cleared on branch {} for type {}.", branchPath, type);
+		} else {
+			logger.info("No versions replaced found to clear for type " + type);
+		}
 	}
 }

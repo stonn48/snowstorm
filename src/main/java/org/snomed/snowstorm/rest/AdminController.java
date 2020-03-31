@@ -166,7 +166,7 @@ public class AdminController {
 
 	@RequestMapping(value = "/{branch}/actions/clear-versions-replaced-information", method = RequestMethod.POST)
 	@ResponseBody
-	public void clearVersionsReplacedInformationOnBranch(@PathVariable String branch) {
-		adminOperationsService.clearVersionsReplacedInformation(BranchPathUriUtil.decodePath(branch));
+	public void clearVersionsReplacedInformationOnBranch(@PathVariable String branch, @RequestParam String type) {
+		adminOperationsService.clearVersionsReplacedInformation(BranchPathUriUtil.decodePath(branch), type);
 	}
 }
